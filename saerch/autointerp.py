@@ -17,6 +17,7 @@ CONFIG_PATH = Path("../config.yaml")
 DATA_DIR = Path("../data")
 SAE_DATA_DIR = Path("sae_data_astroPH")
 
+# SINGLE NEURON ANALYZER FOR TESTING AUTOINTERP
 class NeuronAnalyzer:
     AUTOINTERP_PROMPT = """ 
 You are a meticulous AI and astronomy researcher conducting an important investigation into a certain neuron in a language model trained on astrophysics papers. Your task is to figure out what sort of behaviour this neuron is responsible for -- namely, on what general concepts, features, topics does this neuron fire? Here's how you'll complete the task:

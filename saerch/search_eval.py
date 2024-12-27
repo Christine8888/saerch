@@ -20,10 +20,12 @@ import sys
 sys.path.append('../saerch')
 import family
 import logging
+import json
+from collections import Counter
+import re
+
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
-
 torch.set_grad_enabled(False)
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Set the subject here. Can be "astroPH" or "csLG"
@@ -48,7 +50,7 @@ SUBJECT_SETTINGS = {
         stop=tenacity.stop_after_attempt(5),
         retry=tenacity.retry_if_exception_type(Exception)
     )
-def llm_prompt(prompt, client, model = 'gpt-35-turbo', return_text = False):
+def llm_prompt(prompt, client, model = 'gpt-35-turbo', return_text = False): # utility function for retrying LLM calls
     response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
@@ -116,24 +118,21 @@ class Evaluator():
         
         return result_str
 
-    def compare_retrieval(self, query, model, upweight: float = 10, downweight: float = 0):
+    def compare_retrieval(self, query, model, upweight: float = 10, downweight: float = 0, method = 'auto'):
         logging.info(f"Comparing retrieval for query: {query[:50]}...")
         query_emb = torch.tensor(self.embedding_client.embed(query)).to(device)
         query_act = model.ae(query_emb)
         query_search_results = self.get_search_results(query_emb)
 
         # Select features to upweight and downweight
-        #upweight_label, downweight_label, llm_results, auto_results = self.adjust_query(query, query_emb, query_act, model)
-        upweight_label, downweight_label, auto_results = self.adjust_query_auto(query, query_emb, query_act, model, upweight, downweight)
-
-        # Generate multichoice options
-        mult_choice = self.generate_multichoice(upweight_label, downweight_label, model)
-
-        # Guess for query rewriting (LLM)
-        #llm_guess = self.guess_retrieval(query_search_results, llm_results['up'], mult_choice)
-
-        # Guess for direct latent intervention (auto)
-        auto_guess = self.guess_retrieval(query_search_results, auto_results['up'], mult_choice)
+        if method == 'auto': # by_clamp is also an option
+            upweight_label, downweight_label, auto_results = self.adjust_query_auto(query, query_emb, query_act, model, upweight, downweight)
+            mult_choice = self.generate_multichoice(upweight_label, downweight_label, model)
+            auto_guess = self.guess_retrieval(query_search_results, auto_results['up'], mult_choice)
+        elif method == 'llm':
+            upweight_label, downweight_label, auto_results, auto_results = self.adjust_query_llm(query, query_emb, query_act, model)
+            mult_choice = self.generate_multichoice(upweight_label, downweight_label, model)
+            auto_guess = self.guess_retrieval(query_search_results, auto_results['up'], mult_choice)
 
         logging.info("Retrieval comparison completed")
 
@@ -142,83 +141,81 @@ class Evaluator():
             'upweight_label': upweight_label,
             'downweight_label': downweight_label,
             'mult_choice': mult_choice,
-            #'llm_guess': llm_guess,
-            'auto_guess': auto_guess,
+            'guess': auto_guess,
             'query_search_results': query_search_results,
-            #'llm_results': llm_results,
-            'auto_results': auto_results
+            'results': auto_results
         }
     
-    # def adjust_query_auto(self, query, query_emb, query_act, model, upweight: float, downweight: float):
-    #     logging.info("Adjusting query")
+    def adjust_query_by_clamp(self, query, query_emb, query_act, model, upweight: float, downweight: float):
+        logging.info("Adjusting query")
 
-    #     # Select a random feature to downweight from activating examples
-    #     query_topk = query_act[1]['topk_indices'].detach().numpy()
-    #     clean_ids = model.clean_labels_by_id.keys()
-    #     query_topk = [ind for ind in query_topk if ind in clean_ids]
-    #     downweight_ind = np.random.choice(query_topk, 1)[0]
-    #     downweight_label = model.clean_labels_by_id[downweight_ind]['label']
+        # Select a random feature to downweight from activating examples
+        query_topk = query_act[1]['topk_indices'].detach().numpy()
+        clean_ids = model.clean_labels_by_id.keys()
+        query_topk = [ind for ind in query_topk if ind in clean_ids]
+        downweight_ind = np.random.choice(query_topk, 1)[0]
+        downweight_label = model.clean_labels_by_id[downweight_ind]['label']
 
-    #     # Load the perfect indices
-    #     path = f"../saerch/sae_data_{self.subject}/feature_analysis_results_{SUBJECT_SETTINGS[self.subject]['k']}.json"
+        # Load the perfect indices
+        path = f"../saerch/sae_data_{self.subject}/feature_analysis_results_{SUBJECT_SETTINGS[self.subject]['k']}.json"
 
-    #     with open(path, 'r') as f:
-    #         feature_data = json.load(f)
+        with open(path, 'r') as f:
+            feature_data = json.load(f)
 
-    #     # Get the indices of the features with greater than 0.99 pearson_correlation
-    #     high_corr_indices = [item['index'] for item in feature_data if item['pearson_correlation'] > 0.99]
-    #     logging.info(f"High correlation indices: {len(high_corr_indices)}")
+        # Get the indices of the features with greater than 0.99 pearson_correlation
+        high_corr_indices = [item['index'] for item in feature_data if item['pearson_correlation'] > 0.99]
+        logging.info(f"High correlation indices: {len(high_corr_indices)}")
 
-    #     # Select a random zero feature to upweight
-    #     zero_features = [ind for ind in clean_ids if ind not in query_topk]
-    #     logging.info(f"Zero features: {len(zero_features)}")
-    #     # Get intersection with high correlation indices
-    #     zero_features = list(set(zero_features).intersection(set(high_corr_indices)))
-    #     logging.info(f"Zero features after intersection: {len(zero_features)}")
-    #     upweight_ind = np.random.choice(zero_features, 1)[0]
-    #     upweight_label = model.clean_labels_by_id[upweight_ind]['label']
+        # Select a random zero feature to upweight
+        zero_features = [ind for ind in clean_ids if ind not in query_topk]
+        logging.info(f"Zero features: {len(zero_features)}")
+        # Get intersection with high correlation indices
+        zero_features = list(set(zero_features).intersection(set(high_corr_indices)))
+        logging.info(f"Zero features after intersection: {len(zero_features)}")
+        upweight_ind = np.random.choice(zero_features, 1)[0]
+        upweight_label = model.clean_labels_by_id[upweight_ind]['label']
 
-    #     # Automatic query adjustment
-    #     query_latents = query_act[1]['latents_pre_act'].detach().clone()
+        # Automatic query adjustment
+        query_latents = query_act[1]['latents_pre_act'].detach().clone()
 
-    #     # Apply top-k selection
-    #     topk_values, topk_indices = torch.topk(query_latents, k=model.ae.k, dim=-1)
-    #     topk_values = F.relu(topk_values)  # Apply ReLU activation
+        # Apply top-k selection
+        topk_values, topk_indices = torch.topk(query_latents, k=model.ae.k, dim=-1)
+        topk_values = F.relu(topk_values)
 
-    #     # Create sparse representation
-    #     adjusted_latents = torch.zeros_like(query_latents)
-    #     adjusted_latents.scatter_(-1, topk_indices, topk_values)
+        # Create sparse representation
+        adjusted_latents = torch.zeros_like(query_latents)
+        adjusted_latents.scatter_(-1, topk_indices, topk_values)
 
-    #     # Adjust the specific features
-    #     adjusted_latents[downweight_ind] = downweight  # Set downweighted feature to zero
-    #     adjusted_latents[upweight_ind] = upweight ## Set upweighted feature to 10
+        # Adjust the specific features
+        adjusted_latents[downweight_ind] = downweight  # Set downweighted feature to zero
+        adjusted_latents[upweight_ind] = upweight ## Set upweighted feature to 10
 
-    #     # New topk indices and values from adjusted latents
-    #     topk_values_adjusted, topk_indices_adjusted = torch.topk(adjusted_latents, k=model.ae.k, dim=-1)
+        # New topk indices and values from adjusted latents
+        topk_values_adjusted, topk_indices_adjusted = torch.topk(adjusted_latents, k=model.ae.k, dim=-1)
 
-    #     # Use the model's decode_sparse method
-    #     auto_adjusted_emb = model.ae.decode_sparse(topk_indices_adjusted, topk_values_adjusted)
+        # Use the model's decode_sparse method
+        auto_adjusted_emb = model.ae.decode_sparse(topk_indices_adjusted, topk_values_adjusted)
 
-    #     # Calculate cosine similarity for auto adjustment
-    #     auto_cosine_sim = F.cosine_similarity(query_emb.unsqueeze(0), auto_adjusted_emb.unsqueeze(0)).item() #(query_emb @ auto_adjusted_emb).item()
+        # Calculate cosine similarity for auto adjustment
+        auto_cosine_sim = F.cosine_similarity(query_emb.unsqueeze(0), auto_adjusted_emb.unsqueeze(0)).item() #(query_emb @ auto_adjusted_emb).item()
 
-    #     # Log original topk indices and values
-    #     logging.info(f"Original topk indices: {topk_indices}")
-    #     logging.info(f"Original topk values: {topk_values}")
-    #     # Log adjusted topk indices and values
-    #     logging.info(f"Adjusted topk indices: {topk_indices_adjusted}")
-    #     logging.info(f"Adjusted topk values: {topk_values_adjusted}")
-    #     logging.info(f"Auto adjustment cosine similarity: {auto_cosine_sim}")
+        # Log original topk indices and values
+        logging.info(f"Original topk indices: {topk_indices}")
+        logging.info(f"Original topk values: {topk_values}")
+        # Log adjusted topk indices and values
+        logging.info(f"Adjusted topk indices: {topk_indices_adjusted}")
+        logging.info(f"Adjusted topk values: {topk_values_adjusted}")
+        logging.info(f"Auto adjustment cosine similarity: {auto_cosine_sim}")
 
-    #     auto_up_results = self.get_search_results(auto_adjusted_emb)
+        auto_up_results = self.get_search_results(auto_adjusted_emb)
 
-    #     logging.info("Automatic query adjustment completed")
-    #     logging.info(f"Auto upweighted results: {auto_up_results}")
+        logging.info("Automatic query adjustment completed")
+        logging.info(f"Auto upweighted results: {auto_up_results}")
 
-    #     return upweight_label, downweight_label, {
-    #         'up': auto_up_results,
-    #         'cosine_similarity': auto_cosine_sim
-    #     }
+        return upweight_label, downweight_label, {
+            'up': auto_up_results,
+            'cosine_similarity': auto_cosine_sim
+        }
 
     def adjust_query_auto(self, query, query_emb, query_act, model, upweight: float, downweight: float):
         logging.info("Adjusting query using direct feature vector addition")
@@ -273,7 +270,7 @@ class Evaluator():
             'cosine_similarity': auto_cosine_sim
         }
     
-    def adjust_query(self, query, query_emb, query_act, model):
+    def adjust_query_llm(self, query, query_emb, query_act, model):
         logging.info("Adjusting query")
 
         # Select a random feature to downweight from activating examples
@@ -412,7 +409,7 @@ def save_results(results: List[Dict], filename):
     with open(filename, 'w') as f:
         json.dump(results, f, indent=2)
 
-def main(upweight: float = 10, downweight: float = 0):
+def main(upweight: float = 10, downweight: float = 0, method: str = 'auto'):
     n_dirs = SUBJECT_SETTINGS[SUBJECT]["n_dirs"]
     k = SUBJECT_SETTINGS[SUBJECT]["k"]
     EVALUATION_RESULTS = f'evaluation_results_{SUBJECT}_{n_dirs}_{k}.json'
@@ -427,7 +424,6 @@ def main(upweight: float = 10, downweight: float = 0):
     del embeddings
 
     logging.info("Starting main function")
-
     evaluator = Evaluator(subject=SUBJECT, embeddings_path=emb_path, texts_path=texts_path)
 
     logging.info(f"Loaded {num_abstracts} abstract embeddings for {SUBJECT}.")
@@ -457,7 +453,7 @@ def main(upweight: float = 10, downweight: float = 0):
     logging.info(f"Processing {N} queries")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_index = {executor.submit(evaluator.compare_retrieval, query, model, upweight, downweight): i 
+        future_to_index = {executor.submit(evaluator.compare_retrieval, query, model, upweight, downweight, method): i 
                            for i, query in enumerate(cleaned_queries)}
         
         for future in tqdm(concurrent.futures.as_completed(future_to_index), 
@@ -479,11 +475,6 @@ def main(upweight: float = 10, downweight: float = 0):
     # print(f"Evaluation complete. Results saved to {EVALUATION_RESULTS}")
     return evaluation_results
 
-import json
-import numpy as np
-from collections import Counter
-import re
-
 def load_results(filename):
     with open(filename, 'r') as f:
         return json.load(f)
@@ -499,19 +490,13 @@ def parse_guess(guess):
         return None, None
 
 def calculate_accuracy(results):
-    llm_correct_up = 0
-    llm_correct_down = 0
-    auto_correct_up = 0
-    auto_correct_down = 0
+    correct_up = 0
+    correct_down = 0
     total = 0
 
-    llm_up_distribution = Counter()
-    llm_down_distribution = Counter()
-    auto_up_distribution = Counter()
-    auto_down_distribution = Counter()
-
-    llm_cosine_similarities = []
-    auto_cosine_similarities = []
+    up_distribution = Counter()
+    down_distribution = Counter()
+    cosine_similarities = []
 
     for result in results:
         total += 1
@@ -519,70 +504,47 @@ def calculate_accuracy(results):
         upweight_label = result['upweight_label']
         downweight_label = result['downweight_label']
 
-        # Find the correct indices
+        # correct indices
         correct_up = next(k for k, v in mult_choice.items() if v == upweight_label)
         correct_down = next(k for k, v in mult_choice.items() if v == downweight_label)
         #print(f"Correct Up: {correct_up}, Correct Down: {correct_down}")
 
-        # LLM guesses
-        # llm_up, llm_down = parse_guess(result['llm_guess'])
-        # print(f"LLM Up = {llm_up}, LLM Down = {llm_down}")
-        # if llm_up is not None and llm_down is not None:
-        #     llm_correct_up += (int(llm_up) == int(correct_up))
-        #     llm_correct_down += (int(llm_down) == int(correct_down))
-        #     llm_up_distribution[int(llm_up)] += 1
-        #     llm_down_distribution[int(llm_down)] += 1
-
-        # Auto guesses
-        auto_up, auto_down = parse_guess(result['auto_guess'])
+        # check guesses
+        _up, _down = parse_guess(result['guess'])
         #print(f"Auto Up = {auto_up}, Auto Down = {auto_down}")
-        if auto_up is not None and auto_down is not None:
-            auto_correct_up += (int(auto_up) == int(correct_up))
-            auto_correct_down += (int(auto_down) == int(correct_down))
-            auto_up_distribution[int(auto_up)] += 1
-            auto_down_distribution[int(auto_down)] += 1
+        if _up is not None and _down is not None:
+            correct_up += (int(_up) == int(correct_up))
+            correct_down += (int(_down) == int(correct_down))
+            up_distribution[int(_up)] += 1
+            down_distribution[int(_down)] += 1
 
-        # Cosine similarities
-        #llm_cosine_similarities.append(result['llm_results']['cosine_similarity'])
-        auto_cosine_similarities.append(result['auto_results']['cosine_similarity'])
+        # calculate simularity
+        cosine_similarities.append(result['results']['cosine_similarity'])
 
     return {
-        # 'llm_up_acc': llm_correct_up / total,
-        # 'llm_down_acc': llm_correct_down / total,
-        'auto_up_acc': auto_correct_up / total,
-        'auto_down_acc': auto_correct_down / total,
+        'up_acc': correct_up / total,
+        'down_acc': correct_down / total,
         'total': total,
-        # 'llm_up_dist': llm_up_distribution,
-        # 'llm_down_dist': llm_down_distribution,
-        'auto_up_dist': auto_up_distribution,
-        'auto_down_dist': auto_down_distribution,
-        # 'llm_cosine_similarities': llm_cosine_similarities,
-        'auto_cosine_similarities': auto_cosine_similarities
+        'up_dist': up_distribution,
+        'down_dist': down_distribution,
+        'cosine_similarities': cosine_similarities
     }
 
 def print_stats(stats):
     print("Accuracy Statistics:")
     print(f"Total queries processed: {stats['total']}")
-    # print("\nQuery Rewriting (LLM) Results:")
-    # print(f"Upweighting accuracy: {stats['llm_up_acc']:.2%}")
-    # print(f"Downweighting accuracy: {stats['llm_down_acc']:.2%}")
-    # print(f"Upweighting distribution: {dict(stats['llm_up_dist'])}")
-    # print(f"Downweighting distribution: {dict(stats['llm_down_dist'])}")
-    # print(f"Average cosine similarity: {np.mean(stats['llm_cosine_similarities']):.4f}")
     
-    print("\nDirect Latent Intervention (Auto) Results:")
-    print(f"Upweighting accuracy: {stats['auto_up_acc']:.2%}")
-    print(f"Downweighting accuracy: {stats['auto_down_acc']:.2%}")
-    print(f"Upweighting distribution: {dict(stats['auto_up_dist'])}")
-    print(f"Downweighting distribution: {dict(stats['auto_down_dist'])}")
-    print(f"Average cosine similarity: {np.mean(stats['auto_cosine_similarities']):.4f}")
+    print("\n {} Results:".format(stats['method']))
+    print(f"Upweighting accuracy: {stats['up_acc']:.2%}")
+    print(f"Downweighting accuracy: {stats['down_acc']:.2%}")
+    print(f"Upweighting distribution: {dict(stats['up_dist'])}")
+    print(f"Downweighting distribution: {dict(stats['down_dist'])}")
+    print(f"Average cosine similarity: {np.mean(stats['cosine_similarities']):.4f}")
 
 def main_print(results):
     stats = calculate_accuracy(results)
     print_stats(stats)
     return stats
-
-import os
 
 if __name__ == "__main__":
     upweight_list = [0.1, 0.25, 0.5, 1, 5, 2.5, 10]
@@ -594,20 +556,10 @@ if __name__ == "__main__":
     
     for i, (up, down) in enumerate(combinations):
         filename = f'intervention_results/stats_{up}_{down}.json'
-        # print(f"Running combination {i+1}/{len(combinations)}: Upweight: {up}, Downweight: {down}")
-        # results = main(up, down)
-        # print("Doing main print for results")
-        # stats = main_print(results)
-        
-        # # Save stats as json
-        # with open(filename, 'w') as f:
-        #     json.dump(stats, f, indent=2)
-        # print(f"Combination {i+1}/{len(combinations)} completed and saved")
         
         if not os.path.exists(filename):
             print(f"Running combination {i+1}/{len(combinations)}: Upweight: {up}, Downweight: {down}")
-            results = main(up, down)
-            print("Doing main print for results")
+            results = main(up, down, method = 'auto')
             stats = main_print(results)
             
             # Save stats as json
@@ -616,3 +568,16 @@ if __name__ == "__main__":
             print(f"Combination {i+1}/{len(combinations)} completed and saved")
         else:
             print(f"Skipping combination {i+1}/{len(combinations)}: File already exists for Upweight: {up}, Downweight: {down}")
+    
+    llm_filename = f'intervention_results/stats_llm.json'
+    if not os.path.exists(llm_filename):
+        print(f"Evaluating LLM rewriting")
+        results = main(upweight_list[0], downweight_list[0], method = 'llm')
+        stats = main_print(results)
+        
+        # Save stats as json
+        with open(llm_filename, 'w') as f:
+            json.dump(stats, f, indent=2)
+        print(f"LLM combination completed and saved")
+    else:
+        print(f"Skipping LLM combination: File already exists")

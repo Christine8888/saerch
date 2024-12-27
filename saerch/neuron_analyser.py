@@ -15,17 +15,19 @@ from torch.utils.data import DataLoader, TensorDataset
 import family
 import torch
 
-# Constants
+# Paths
 CONFIG_PATH = Path("../config.yaml")
 DATA_DIR = Path("../data")
-CSLG = True
 SAE_DATA_DIR = Path("../saerch/sae_data_csLG") if CSLG else Path("../saerch/sae_data_astroPH")
-k = 64
-ndir = 9216
 OUTPUT_FILE = Path(f"feature_analysis_results_{k}.json")
 # Join OUTPUT_FILE path with SAE_DATA_DIR
 OUTPUT_FILE = SAE_DATA_DIR / OUTPUT_FILE
 SAVE_INTERVAL = 10
+
+# Model hyperparameters
+CSLG = True
+k = 64
+ndir = 9216
 
 @dataclass
 class Feature:
@@ -166,7 +168,7 @@ Work through the steps thoroughly and analytically to predict whether the neuron
         doc_ids = self.abstract_texts['doc_ids']
         abstracts = self.abstract_texts['abstracts']
         
-        if isinstance(feature_index, list):
+        if isinstance(feature_index, list): # feature family, sample from top bins
             if sample:
                 bins_dict = {}
                 for bin_num in range(1, 11):
@@ -196,7 +198,7 @@ Work through the steps thoroughly and analytically to predict whether the neuron
                     if len(abstracts[i]) > min_length and i not in top_m_indices:
                         top_m_abstracts.append((doc_ids[i], abstracts[i], all_activation_values[i]))
                         top_m_indices.append(i)
-            else:
+            else: # sample from top values across all feature family members
                 feature_mask = self.topk_indices == feature_index
                 activated_indices = np.where(feature_mask.any(axis=1))[0]
                 activation_values = np.where(feature_mask, self.topk_values, 0).max(axis=1)
@@ -212,13 +214,11 @@ Work through the steps thoroughly and analytically to predict whether the neuron
                     if len(top_m_abstracts) == m:
                         break
 
-        else:
+        else: # single feature, use mask and take top values
             feature_mask = self.topk_indices == feature_index
             feature_mask = np.isin(self.topk_indices, feature_index)
-        
             activated_indices = np.where(feature_mask.any(axis=1))[0]
             activation_values = np.where(feature_mask, self.topk_values, 0).max(axis=1)
-
             sorted_activated_indices = activated_indices[np.argsort(-activation_values[activated_indices])]
 
             top_m_abstracts = []
@@ -243,7 +243,6 @@ Work through the steps thoroughly and analytically to predict whether the neuron
                 break
 
         return top_m_abstracts, zero_activation_samples
-
 
     def generate_family_feature(self, parent, feature_names):
         feature_str = "\n".join(feature_names)
@@ -322,16 +321,10 @@ Work through the steps thoroughly and analytically to predict whether the neuron
     def predict_activation(self, interpretation: str, abstract: str) -> float:
         prompt = self.FAMILY_PREDICTION_BASE_PROMPT.format(prompt_terms = self.PROMPT_TERMS, description=interpretation, abstract=abstract)
         response = self.client.chat.completions.create(
-            #model="gpt-35-turbo",
-            model="gpt-4o-mini", #"gpt-3.5-turbo",
+            model="gpt-4o-mini", 
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
         )
-        # response = self.azure_client.chat.completions.create(
-        #     model="gpt-4o-mini",
-        #     messages=[{"role": "user", "content": prompt}],
-        #     temperature=0.0,
-        # )
         response_text = response.choices[0].message.content
         #print(response_text)
         try:
