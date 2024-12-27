@@ -18,7 +18,7 @@ class FastAutoencoder(nn.Module):
         self.d_model = d_model
         self.k = k
         self.auxk = auxk
-        self.multik = multik
+        self.multik = multik 
         self.dead_steps_threshold = dead_steps_threshold
 
         self.encoder = nn.Linear(d_model, n_dirs, bias=False)
@@ -125,7 +125,7 @@ def mse(output, target):
 def normalized_mse(recon, xs):
     return mse(recon, xs) / mse(xs.mean(dim=0, keepdim=True).expand_as(xs), xs)
 
-def loss_fn(ae, x, recons, info, auxk_coef, multik_coef):
+def loss_fn(ae, x, recons, info, auxk_coef, multik_coef = 0):
     recons_loss = normalized_mse(recons, x)
     recons_loss += multik_coef * normalized_mse(info["multik_recons"], x)
     
@@ -214,8 +214,8 @@ def main():
     lr = 1e-4
     auxk_coef = 1/32
     clip_grad = 1.0
-    multik_coef = 0 # turn it off
-
+    multik_coef = 0 # SET THIS TO TURN MULTIK ON OR OFF!
+    
     csLG = False
 
     # Create model name
