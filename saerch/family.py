@@ -36,49 +36,8 @@ def nn_hierarchy(ae_large, ae_small, save_path = None): # nearest neighbors hier
 
     return nns
 
-def clean(label):
-    label = label.split(' in astronomy')[0].split(' in astrophysics')[0].split(' in physics')[0].split(' in astronomical')[0].split(' in astrophysical')[0]
-    label = label.split(' in Astronomy')[0].split(' in Astrophysics')[0].split(' in Physics')[0].split(' in Astronomical')[0].split(' in Astrophysical')[0]
-    label = label.split(' in computer science')[0].split(' in CS')[0]
-    if len(re.findall(r"""["'][A-Za-z]["']""", label)) > 0:
-        return ""
-    if len(re.findall(r"[Kk]eyword", label)) > 0:
-        return ""
-    if len(re.findall(r"[Tt]opic", label)) > 0:
-        return ""
-    if len(re.findall(r"[Cc]oncept", label)) > 0:
-        return ""
-    if len(re.findall(r"[Pp]resence", label)) > 0:
-        return ""
-    return label
-
-def get_clean_labels(auto_results, density_threshold = 1):
-    clean_labels = {}
-    for result in auto_results:
-        label = result['label']
-        clean_label = clean(label)
-        
-        if clean_label != "":
-            result['clean_label'] = clean_label
-            if result['f1'] >= 0.8 and result['pearson_correlation'] >= 0.8 and result['density'] < density_threshold:
-                if clean_label not in clean_labels.keys():
-                    clean_labels[clean_label] = {'index': result['index'], 'density': result['density'], 'f1': result['f1'], 'pearson_correlation': result['pearson_correlation'],}
-                else:
-                    # keep only the highest-scoring label if repeats
-                    existing = clean_labels[clean_label]
-                    if result['f1'] + result['pearson_correlation'] > existing['f1'] + existing['pearson_correlation']:
-                        clean_labels[clean_label] = {'index': result['index'], 'density': result['density'], 'f1': result['f1'], 'pearson_correlation': result['pearson_correlation'],}
-    
-    return clean_labels
-
-def get_cosine_sim(weight1, weight2, targets1, targets2):
-    A = weight1[targets1] # n1 x 1536
-    B = weight2[targets2] # 1536 x n2
-
-    return np.dot(A, B.T)
-
-
 class FeatureFamily():
+    # feature family: hierarchical cluster of features with co-occurrence relationships
     def __init__(self, parent, children):
         self.parent = parent
         self.children = children
@@ -87,9 +46,9 @@ class FeatureFamily():
         return {'parent': self.parent, 'children': self.children}
 
     def get_names_and_ids(self, model):
-        children = [child[0] for child in self.children]
-        ids = [child[1] for child in self.children]
-        densities = [model.norms[id] for id in ids]
+        children = [child[0] for child in self.children] # just names
+        ids = [child[1] for child in self.children] # ids
+        densities = [model.norms[id] for id in ids] # map to density
         all_names = children + [self.parent[0]]
         
         ids = list(np.array(ids)[np.argsort(densities)])
@@ -121,6 +80,7 @@ class FeatureFamily():
 
 
 class MultiModel():
+    # multi-model analysis for SAEs with different capacities
     def __init__(self, model_list, all_onehots, all_acts):
         self.model_list = model_list
         self.index, self.feature_index = self.generate_index() # matrix index to feature
@@ -147,68 +107,66 @@ class MultiModel():
         self.cosine_sim = np.dot(self.feature_vectors, self.feature_vectors.T)
     
     def generate_index(self):
-        ids = []
         index = []
         feature_index = {}
-
         tally = 0
-        for i, model in enumerate(self.model_list):
-            model_ids = model.clean_labels_by_id.keys()
-            ids += list()
 
-            for j, id in enumerate(model_ids):
-                index.append(model.clean_labels_by_id[id]['label'])
+        for i, model in enumerate(self.model_list):
+            for id, label_info in model.clean_labels_by_id.items():
+                index.append(label_info['label'])
                 feature_index[(i, id)] = tally
                 tally += 1
-        
+
         return index, feature_index
-    
+
+
 
     def explore_splitting(self, ind, nns_list, names = ["SAE16", "SAE32", "SAE64"], verbose = True):
-        targets = [ind]
+        # look at nearest-neighbor features in each model
+        targets = [ind] # start with target feature in the lowest-capacity model
         matrix_indices = [] # initial index
         feature_names = []
 
         for i, model in enumerate(self.model_list):
             if verbose: print(i, targets, model.get_feature_names(targets))
-            
             next_targets = []
             
-            j = 0
-            set2 = set()
             for target in targets:
-                if j < 10:
-                    try:
-                        matrix_indices.append(self.feature_index[(i, target)])
-                        feature_names.append((names[i], j, model.clean_labels_by_id[target]['label']))
-                        j += 1
-                    except:
-                        if verbose: print('{} not in clean feature list'.format(target))
-                    
-                    if i < len(self.model_list) - 1:
-                        matches = nns_list[i][target]
-                        if len(matches) > 0:
-                            # print(get_cosine_sim(model.feature_vectors, self.model_list[i + 1].feature_vectors, target, matches))
-                            next_targets += matches
-                    else:
-                        set2 = model.get_feature_names(targets)
+                try:
+                    matrix_indices.append(self.feature_index[(i, target)])
+                    feature_names.append((names[i], j, model.clean_labels_by_id[target]['label']))
+                    j += 1
+                except:
+                    if verbose: print('{} not in clean feature list'.format(target))
                 
-            targets = next_targets
+                if i < len(self.model_list) - 1: # anything except the last model
+                    matches = nns_list[i][target]
+                    if len(matches) > 0:
+                        # print(get_cosine_sim(model.feature_vectors, self.model_list[i + 1].feature_vectors, target, matches))
+                        next_targets += matches
+                    targets = next_targets # set up for next iteration
+                
+                else: # 16 --> 32 --> 64 pathway
+                    set2 = model.get_feature_names(targets)
         
-        # 16 --> 64 directly
+        # also look at 16 --> 64 directly
         if len(nns_list) == len(self.model_list):
             if verbose: print('self consistency ', nns_list[-1][ind], self.model_list[-1].get_feature_names(nns_list[-1][ind]))
             if verbose: print(get_cosine_sim(self.model_list[0].feature_vectors, self.model_list[-1].feature_vectors, ind, nns_list[-1][ind]))
 
         set1 = self.model_list[-1].get_feature_names(nns_list[-1][ind])
+        
+        # look at overlap between set1 and set2 for self-consistency
         if len(set(set1).union(set(set2))) == 0:
             intersection = 0
         else:
             intersection = len(set(set1).intersection(set(set2))) / len(set(set1).union(set(set2)))
+        
         return matrix_indices, feature_names, intersection
         
 
 class Model():
+    # single-model analysis for SAE
     def __init__(self, sae_data_dir, model_path, autointerp_results, dataloader, num_abstracts, topk_indices = None, topk_values = None, 
                  mat = None, norms = None, actsims = None, d_model = 1536):
         
@@ -219,6 +177,7 @@ class Model():
         self.dataloader = dataloader
         self.num_abstracts = num_abstracts
 
+        # load matrices (can get very large, save to disk)
         mat = sae_data_dir + 'unnorm_cooccurrence_{}_{}.npy'.format(self.k, self.n_dirs) if mat is None else mat
         norms = sae_data_dir + 'norms_{}_{}.npy'.format(self.k, self.n_dirs) if norms is None else norms
         actsims = sae_data_dir + 'actsims_{}_{}.npy'.format(self.k, self.n_dirs) if actsims is None else actsims
@@ -269,6 +228,7 @@ class Model():
         self.neuron = None #NeuronAnalyzer(CONFIG, 1, 10, k = self.k, ndirs = self.n_dirs)
 
     def generate_topk(self, topk_indices_path = None, topk_values_path = None):
+        # generate topk indices and values
         print('Generating topk indices and values...')
         topk_indices = np.zeros((self.num_abstracts, self.k), dtype=np.int64)
         topk_values = np.zeros((self.num_abstracts, self.k), dtype=np.float32)
@@ -294,6 +254,7 @@ class Model():
         return topk_indices, topk_values
 
     def generate_matrix(self, mat_path = None, norms_path = None): # if it doesn't exist
+        # generate one-hot co-occurrence matrix and norms
         print('Generating matrix and norms...')
         activations = matrix.activations(self.topk_indices, self.topk_values, nex = self.num_abstracts, ndir = self.n_dirs, mode = 'onehot')
         mat, norms = matrix.co_occurrence(activations)
@@ -305,6 +266,7 @@ class Model():
         return activations, mat, norms
     
     def generate_activation_sims(self, actsim_path):
+        # generate activation similarity matrix
         print('Generating activation similarities...')
         activations = matrix.activations(self.topk_indices, self.topk_values, nex = self.num_abstracts, ndir = self.n_dirs, mode = 'value')
         mat, norms = matrix.co_occurrence(activations)
@@ -313,7 +275,7 @@ class Model():
 
         return activations, mat
 
-    def get_feature_activations(self, n, feature_index = None, feature_name = None): # example abstracts
+    def get_feature_activations(self, n, feature_index = None, feature_name = None): # example abstracts, top and non activating
         if feature_index is None:
             if feature_name is None:
                 raise ValueError("Either feature_index or feature_name must be provided")
@@ -329,7 +291,8 @@ class Model():
         subtrees = matrix.subtree_iterate(self.mat, self.norms, G_tree, self.clean_labels, n = n)
         return subtrees
     
-    def deduplicate_families(self, families):
+    def deduplicate_families(self, families, threshold = 0.6):
+        # deduplicate families by intersection/union ratio, helper function
         tally = 0
         clean_families = families.copy()
         for family in families:
@@ -337,7 +300,7 @@ class Model():
                 if family != family2:
                     intersection = set(families[family].children).intersection(families[family2].children)
                     union = set(families[family].children).union(families[family2].children)
-                    if len(intersection) / len(union) > 0.6:
+                    if len(intersection) / len(union) > threshold:
                         tally += 1
                         try:
                             if len(families[family].children) > len(families[family2].children): clean_families.pop(family2)
@@ -350,6 +313,7 @@ class Model():
         return clean_families
 
     def dedup_and_save_families(self, subtrees, save_path = None):
+        # save families to disk
         if save_path is None:
             save_path = self.sae_data_dir + 'clean_families_{}_{}.json'.format(self.k, self.n_dirs)
         families = {}
@@ -366,6 +330,7 @@ class Model():
         return families
     
     def load_all_families(self, n = None):
+        # load families from disk
         path = self.sae_data_dir + 'clean_families_{}_{}.json'.format(self.k, self.n_dirs)
         if not os.path.exists(path) or n is not None:
             print('No saved families found. Generating...')
@@ -386,3 +351,46 @@ class Model():
                 feature_list[list(indices).index(result['index'])] = result['label']
         
         return feature_list
+    
+
+def clean(label):
+    label = label.split(' in astronomy')[0].split(' in astrophysics')[0].split(' in physics')[0].split(' in astronomical')[0].split(' in astrophysical')[0]
+    label = label.split(' in Astronomy')[0].split(' in Astrophysics')[0].split(' in Physics')[0].split(' in Astronomical')[0].split(' in Astrophysical')[0]
+    label = label.split(' in computer science')[0].split(' in CS')[0]
+    if len(re.findall(r"""["'][A-Za-z]["']""", label)) > 0:
+        return ""
+    if len(re.findall(r"[Kk]eyword", label)) > 0:
+        return ""
+    if len(re.findall(r"[Tt]opic", label)) > 0:
+        return ""
+    if len(re.findall(r"[Cc]oncept", label)) > 0:
+        return ""
+    if len(re.findall(r"[Pp]resence", label)) > 0:
+        return ""
+    return label
+
+def get_clean_labels(auto_results, density_threshold = 1):
+    # get cleanly interpretable labels, remove duplicates, keep highest-scoring label if repeats
+    clean_labels = {}
+    for result in auto_results:
+        label = result['label']
+        clean_label = clean(label)
+        
+        if clean_label != "":
+            result['clean_label'] = clean_label
+            if result['f1'] >= 0.8 and result['pearson_correlation'] >= 0.8 and result['density'] < density_threshold:
+                if clean_label not in clean_labels.keys():
+                    clean_labels[clean_label] = {'index': result['index'], 'density': result['density'], 'f1': result['f1'], 'pearson_correlation': result['pearson_correlation'],}
+                else:
+                    # keep only the highest-scoring label if repeats
+                    existing = clean_labels[clean_label]
+                    if result['f1'] + result['pearson_correlation'] > existing['f1'] + existing['pearson_correlation']:
+                        clean_labels[clean_label] = {'index': result['index'], 'density': result['density'], 'f1': result['f1'], 'pearson_correlation': result['pearson_correlation'],}
+    
+    return clean_labels
+
+def get_cosine_sim(weight1, weight2, targets1, targets2):
+    A = weight1[targets1] # n1 x 1536
+    B = weight2[targets2] # 1536 x n2
+
+    return np.dot(A, B.T)
