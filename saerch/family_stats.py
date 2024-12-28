@@ -4,8 +4,9 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch
 import family
 
-def get_membership_fraction(interp, model):
-    clean_interp = [fam for fam in interp if fam['family_f1'] >= 0.8 and fam['family_pearson'] >= 0.8]
+def get_membership_fraction(interp, model, threshold = 0.8 ):
+    # compute fraction of features that are in a family
+    clean_interp = [fam for fam in interp if fam['family_f1'] >= threshold and fam['family_pearson'] >= threshold] # threshold
     family_index = {key: [] for key in model.clean_labels.keys()}
     
     for fam in clean_interp:
@@ -24,6 +25,7 @@ def get_membership_fraction(interp, model):
     return in_a_family / total
 
 def block_diagonalize(model, interp):
+    # order matrix by family then by feature
     index_order = []
     family_lengths = []
     seen = set()
@@ -54,22 +56,25 @@ def block_diagonalize(model, interp):
 
     return index_order, family_lengths, seen
 
-def compute_block_ratio(matrix, block_lengths):
+def compute_block_ratio(matrix, block_lengths, mode = 'ratio'):
+    # compute block ratio of matrix
     block_elements = []
     offdiag_elements = []
     for i in range(len(block_lengths) - 1):
         block = matrix[block_lengths[i]:block_lengths[i + 1], block_lengths[i]:block_lengths[i + 1]]
-        # offdiag_below = matrix[block_lengths[i]:block_lengths[i + 1], :block_lengths[i]]
-        # offdiag_above = matrix[block_lengths[i]:block_lengths[i + 1], block_lengths[i + 1]:]
-        # offdiag = np.concatenate((offdiag_below, offdiag_above), axis = 1)
         
         block_elements.extend(block.flatten())
-        # offdiag_elements.extend(offdiag.flatten())
+        if mode == 'ratio':
+            offdiag_below = matrix[block_lengths[i]:block_lengths[i + 1], :block_lengths[i]]
+            offdiag_above = matrix[block_lengths[i]:block_lengths[i + 1], block_lengths[i + 1]:]
+            offdiag = np.concatenate((offdiag_below, offdiag_above), axis = 1)
+            offdiag_elements.extend(offdiag.flatten())
     
-    #return np.mean(block_elements) / np.mean(offdiag_elements)
-    return np.sum(block_elements) / np.sum(matrix)
+    if mode == 'ratio': return np.mean(block_elements) / np.mean(offdiag_elements)
+    elif mode == 'fraction': return np.sum(block_elements) / np.sum(matrix)
 
 def get_child_mean(interp):
+    # compute mean f1 and pearson for children of each family
     child_f1s = []
     child_pearsons = []
     
@@ -80,6 +85,7 @@ def get_child_mean(interp):
     return np.mean(child_f1s), np.mean(child_pearsons)
 
 def get_family_stats(clean_families, interp, model, verbose = True): # clean families is the original family json, interp is the autointerp
+    # clean & tabular format for feature family stats
     size = [len(clean_families[fam].children) for fam in clean_families]
     if verbose: print('mean family size', np.mean(size))
     
