@@ -5,7 +5,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import json
 import matrix
-import clamp
 import pandas as pd
 from topk_sae import FastAutoencoder, loss_fn, unit_norm_decoder_grad_adjustment_, unit_norm_decoder_, init_from_data_
 from autointerp import NeuronAnalyzer

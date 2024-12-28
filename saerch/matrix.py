@@ -12,20 +12,9 @@ import networkx as nx
 torch.set_grad_enabled(False)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# def co_occurrence(topk_indices, k = 64, ndir=9216):
-#     co_occurrence = np.zeros((ndir, ndir))
-#     norms = np.zeros(ndir)
-#     for i in tqdm(range(topk_indices.shape[0]), desc="Calculating co-occurrence"):
-#         for j in range(k):
-#             norms[topk_indices[i, j]] += 1
-#             for l in range(j + 1, k):
-#                 co_occurrence[topk_indices[i, j], topk_indices[i, l]] += 1
-#                 co_occurrence[topk_indices[i, l], topk_indices[i, j]] += 1
-
-#     return co_occurrence, norms
-
 def activations(topk_indices, topk_values, ndir, nex, mode = 'onehot'):
-    print(nex, ndir)
+    # compute activation matrix
+    # print(nex, ndir)
     activations = torch.zeros((int(nex), int(ndir)))
     if mode == 'value':
         activations = activations.scatter_(1, torch.tensor(topk_indices), torch.tensor(topk_values))
@@ -36,6 +25,7 @@ def activations(topk_indices, topk_values, ndir, nex, mode = 'onehot'):
     return activations
 
 def co_occurrence(activations):
+    # compute co-occurrence matrix or activation similarity matrix; depends on what activations are passed in
     co_occurrence = np.dot(activations.T, activations)
     norms = co_occurrence.diagonal()
     #np.fill_diagonal(co_occurrence, 0)
@@ -43,13 +33,14 @@ def co_occurrence(activations):
     return co_occurrence, norms
 
 def kill_symmetry(mat, node_vals):
-    for i in range(mat.shape[0]):
-        for j in range(mat.shape[1]):
-            if node_vals[i] >= node_vals[j]:
-                mat[i, j] = 0
+    # make directed graph matrix by setting mat[i, j] to 0 where node_vals[i] >= node_vals[j]
+    node_vals = np.array(node_vals)
+    mask = node_vals[:, np.newaxis] < node_vals[np.newaxis, :]
+    mat *= mask
     return mat
 
 def node_neighbors(G, node, direction):
+    # get neighbors of node in direction; used for website, sanity checking
     if direction == "up":
         in_edges = list(G.in_edges(node))
         nodes = [edge[0] for edge in in_edges]
@@ -60,15 +51,14 @@ def node_neighbors(G, node, direction):
     return nodes
 
 def make_graph(mat, clean_results, directed = True, set_names = True, filename = None):
+    # make graphml viewable graph from co-occurrence matrix
     node_density = [np.log10(feature['density']) for feature in clean_results.values()]
     
     if directed:
         mat = kill_symmetry(mat, node_density)
         G = nx.from_numpy_array(mat, create_using=nx.DiGraph())
-    else:
-        G = nx.from_numpy_array(mat, create_using=nx.Graph())
+    else: G = nx.from_numpy_array(mat, create_using=nx.Graph())
     #auto_labels_indexed = {label['index']: label for label in auto_results}
-    
     
     node_names = [feature for feature in clean_results]
     mapping_name = {i: node_names[i] for i in range(len(node_names))}
@@ -86,6 +76,7 @@ def make_graph(mat, clean_results, directed = True, set_names = True, filename =
     return G
 
 def make_MST(mat, clean_results, filename = None, gradient = "decreasing", algorithm = 'kruskal', add_noise = False):
+    # make MST from co-occurrence matrix
     G = nx.from_numpy_array(mat, create_using=nx.Graph())
 
     node_names = [feature for feature in clean_results]
@@ -119,7 +110,8 @@ def make_MST(mat, clean_results, filename = None, gradient = "decreasing", algor
     return G_tree_directed
 
 def get_norm_cooc(unnorm_mat, norm, clean_labels, direction = "vertical", threshold = 0.07, poisson = False, exp = True):
-    if poisson:
+    # normalize co-occurrence matrix
+    if poisson: # add poisson noise to matrix, optional, for iterations
         unnorm_mat += np.random.normal(0, np.sqrt(unnorm_mat))
     
     if direction == "vertical":
@@ -137,6 +129,7 @@ def get_norm_cooc(unnorm_mat, norm, clean_labels, direction = "vertical", thresh
     return clean_mat
 
 def level_subtree(G_tree):
+    # get all subtrees starting at a certain depth, with >2 children
     subtrees = []
     for node in G_tree.nodes:
         if G_tree.in_degree(node) == 0 and G_tree.out_degree(node) > 2:
@@ -145,6 +138,7 @@ def level_subtree(G_tree):
     return subtrees
 
 def print_subtree(subtree, clean_labels, all_children = [], verbose = True):
+    # traverse subtree and print nodes
     if verbose: print('root: ', subtree[0])
     for node in subtree[1].nodes:
         if node != subtree[0]:
@@ -157,6 +151,7 @@ def print_subtree(subtree, clean_labels, all_children = [], verbose = True):
     return subtree[0], all_children
 
 def recursive_subtree(G_tree):
+    # recursively explore subtrees
     subtrees = level_subtree(G_tree)
     
     for subtree in subtrees:
@@ -182,6 +177,7 @@ def delete_top(mat, norms, subtrees, clean_labels):
 
 
 def subtree_iterate(mat, norms, G_tree, clean_labels, n = 3):
+    # run multiple iterations; algorithm described in paper
     subtrees = recursive_subtree(G_tree)
     all_subtrees = [subtrees]
     

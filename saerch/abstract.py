@@ -7,9 +7,9 @@ from dataclasses import dataclass
 import argparse
 
 parser = argparse.ArgumentParser(description="Abstract processor")
-parser.add_argument("--dir_id", type=str, default="astroPH", help="ID of the vector store")
+parser.add_argument("--subject", type=str, default="astroPH", help="ID of the vector store")
 args = parser.parse_args()
-DIR_ID = args.dir_id
+SUBJECT = args.subject
 
 @dataclass
 class Document:
@@ -23,14 +23,14 @@ class Document:
     keywords: List[str] = None
 
 # load the full embeddings matrix
-embeddings = np.load(f'../data/vector_store_{DIR_ID}/embeddings_matrix.npy')
+embeddings = np.load(f'../data/vector_store_{SUBJECT}/embeddings_matrix.npy')
 
 # load the index mapping
-with open(f'../data/vector_store_{DIR_ID}/index_mapping.pkl', 'rb') as f:
+with open(f'../data/vector_store_{SUBJECT}/index_mapping.pkl', 'rb') as f:
     index_mapping = pickle.load(f)
 
 # load the documents
-with open(f'../data/vector_store_{DIR_ID}/documents.pkl', 'rb') as f:
+with open(f'../data/vector_store_{SUBJECT}/documents.pkl', 'rb') as f:
     documents = pickle.load(f)
 
 # create lists to store the abstract embeddings and corresponding text
@@ -61,10 +61,10 @@ print(f"Length of abstract texts: {len(abstract_texts)}")
 print(f"Length of document ids: {len(doc_ids)}")
 
 # save the abstract embeddings
-np.save(f'../data/vector_store_{DIR_ID}/abstract_embeddings.npy', abstract_embeddings)
+np.save(f'../data/vector_store_{SUBJECT}/abstract_embeddings.npy', abstract_embeddings)
 
 # save the abstract texts and document ids
-with open('../data/vector_store/abstract_texts.json', 'w') as f:
+with open(f'../data/vector_store_{SUBJECT}/abstract_texts.json', 'w') as f:
     json.dump({
         'doc_ids': doc_ids,
         'abstracts': abstract_texts
