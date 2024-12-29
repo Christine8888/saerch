@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Any
 from dataclasses import dataclass, asdict
 import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 import random
 import numpy as np
 import yaml
@@ -15,19 +16,20 @@ from torch.utils.data import DataLoader, TensorDataset
 import family
 import torch
 
-# Paths
-CONFIG_PATH = Path("../config.yaml")
-DATA_DIR = Path("../data")
-SAE_DATA_DIR = Path("../saerch/sae_data_csLG") if CSLG else Path("../saerch/sae_data_astroPH")
-OUTPUT_FILE = Path(f"feature_analysis_results_{k}.json")
-# Join OUTPUT_FILE path with SAE_DATA_DIR
-OUTPUT_FILE = SAE_DATA_DIR / OUTPUT_FILE
-SAVE_INTERVAL = 10
 
 # Model hyperparameters
 CSLG = True
 k = 64
 ndir = 9216
+
+# Paths
+CONFIG_PATH = Path("../config.yaml")
+DATA_DIR = Path("../data")
+SAE_DATA_DIR = Path("../saerch/sae_data_csLG") if CSLG else Path("../saerch/sae_data_astroPH")
+OUTPUT_FILE = Path(f"feature_analysis_results_{k}_{ndir}.json")
+# Join OUTPUT_FILE path with SAE_DATA_DIR
+OUTPUT_FILE = SAE_DATA_DIR / OUTPUT_FILE
+SAVE_INTERVAL = 10
 
 @dataclass
 class Feature:
@@ -405,122 +407,90 @@ def load_results(filename: Path) -> List[Dict]:
             return json.load(f)
     return []
 
+def analyze_all_features(analyzer, num_samples = 10, save_file = None):
+    # for individual features
+    if save_file is None: save_file = OUTPUT_FILE # use default output file
+
+    results = load_results(save_file) 
+    existing_indices = [feature['index'] for feature in results]
+    all_indices = list(range(ndir))
+    missing = [i for i in all_indices if i not in existing_indices]
+    print("Starting analysis from index {}".format(min(missing)))
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_index = {
+            executor.submit(analyzer.analyze_feature, i, num_samples): i
+            for i in missing
+        }
+
+        for future in tqdm(
+            concurrent.futures.as_completed(future_to_index),
+            total=len(missing),
+            desc="Analysing features"
+        ):
+            feature_index = future_to_index[future]
+            try:
+                feature = future.result()
+                results.append(asdict(feature))
+
+                # Save checkpoint
+                if len(results) % SAVE_INTERVAL == 0:
+                    save_results(results, OUTPUT_FILE)
+                    print(f"Checkpoint saved. Processed {len(results)} features.")
+
+            except Exception as exc:
+                print(f"Feature {feature_index} generated an exception: {exc}")
+
+    save_results(results, OUTPUT_FILE)
+    print(f"Analysis complete. Results saved to {OUTPUT_FILE}")
+
+
+def analyze_family(analyzer, families, model, save_file):
+    # runs interp_superfeature on each 
+    start_index = 0
+    print(f"Starting analysis from family {start_index}...")
+
+    results = load_results(save_file)
+    completed = [result['index'] for result in results]
+    family_id_list = list(families.keys())
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_index = {
+            executor.submit(analyzer.interp_superfeature, families[family_id_list[i]], model): i
+            for i in family_id_list if i not in completed
+        }
+
+        for future in tqdm(
+            concurrent.futures.as_completed(future_to_index),
+            total=len(family_id_list) - start_index,
+            desc="Analysing families"
+        ):
+            feature_index = future_to_index[future]
+            try:
+                feature = future.result()
+                feature['index'] = family_id_list[feature_index]
+                results.append(feature)
+
+                # Save checkpoint
+                if len(results) % SAVE_INTERVAL == 0:
+                    save_results(results, save_file)
+                    print(f"Checkpoint saved. Processed {len(results)} families.")
+
+            except Exception as exc:
+                print(f"Family {feature_index} generated an exception: {exc}")
+
+    save_results(results, save_file)
+    print(f"Analysis complete. Results saved to {save_file}")
+
+
 def main():
-    analyzer = BatchNeuronAnalyzer(CONFIG_PATH)
-    mode = "family"
+    analyzer = BatchNeuronAnalyzer(CONFIG_PATH)  # Presumably you have this class defined
+    mode = "individual"  # Change this to 'individual', 'rerun', or 'family' as needed
     num_samples = 10
 
-    # Load existing results and determine the starting point
     if mode == "individual":
-        num_features = 3072
-        results = load_results(OUTPUT_FILE)
-        start_index = max([feature['index'] for feature in results], default=-1) + 1
-        #print(f"Starting analysis from feature {start_index}...")
-        all_indices = list(range(num_features))
-        missing = [i for i in all_indices if i not in [feature['index'] for feature in results]]
-        print("Filling in analysis on: {}".format(missing))
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            #future_to_index = {executor.submit(analyzer.analyze_feature, i, num_samples): i 
-            #                for i in range(start_index, num_features)}
-            future_to_index = {executor.submit(analyzer.analyze_feature, i, num_samples): i for i in missing}
+        analyze_all_features(analyzer, num_samples)
 
-            for future in tqdm(concurrent.futures.as_completed(future_to_index), 
-                            total=num_features - start_index, 
-                            desc="Analysing features"):
-                feature_index = future_to_index[future]
-                try:
-                    feature = future.result()
-                    results.append(asdict(feature))
-                    
-                    # Save checkpoint
-                    if len(results) % SAVE_INTERVAL == 0:
-                        save_results(results, OUTPUT_FILE)
-                        print(f"Checkpoint saved. Processed {len(results)} features.")
-                    
-                except Exception as exc:
-                    print(f"Feature {feature_index} generated an exception: {exc}")
-
-        save_results(results, OUTPUT_FILE)
-        print(f"Analysis complete. Results saved to {OUTPUT_FILE}")
-    
-    elif mode == 'rerun':
-        num_features = 3072
-        results = load_results(OUTPUT_FILE)
-        new_output_file = '../saerch/sae_data_astroPH/feature_analysis_results_16_4omini.json'
-        new_results = []
-
-        start_index = 0
-        all_indices = list(range(num_features))
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_index = {executor.submit(analyzer.analyze_feature, None, None, results[i]): i 
-                           for i in range(start_index, num_features)}
-
-            for future in tqdm(concurrent.futures.as_completed(future_to_index), 
-                            total=num_features - start_index, 
-                            desc="Analysing features"):
-                feature_index = future_to_index[future]
-                try:
-                    feature = future.result()
-                    new_results.append(asdict(feature))
-                    
-                    # Save checkpoint
-                    if len(new_results) % SAVE_INTERVAL == 0:
-                        save_results(new_results, new_output_file)
-                        print(f"Checkpoint saved. Processed {len(new_results)} features.")
-                    
-                except Exception as exc:
-                    print(f"Feature {feature_index} generated an exception: {exc}")
-
-        save_results(new_results, new_output_file)
-        print(f"Analysis complete. Results saved to {new_output_file}")
-
-    elif mode == "family":
-        start_index = 0
-        print(f"Starting analysis from family {start_index}...")
-        
-        results = []
-        save_file = "../saerch/sae_data_csLG/family_analysis_64_9216.json"
-
-        mode = 'csLG'
-        SAE_DATA_DIR = '../saerch/sae_data_{}/'.format('csLG')
-        DATA_DIR = '../data/vector_store_csLG/'
-
-        abstract_embeddings_a = np.load(DATA_DIR + "/abstract_embeddings.npy")
-        abstract_embeddings_a = abstract_embeddings_a.astype(np.float32)
-
-        dataset_a = TensorDataset(torch.from_numpy(abstract_embeddings_a))
-        dataloader_a = DataLoader(dataset_a, batch_size=1024, shuffle=False)
-        num_abstracts_a = len(abstract_embeddings_a)
-
-        model = family.Model(sae_data_dir = SAE_DATA_DIR, model_path = '../models/64_9216_128_auxk_{}_epoch_88.pth'.format(mode), autointerp_results = 'feature_analysis_results_64.json',
-                             dataloader = dataloader_a, num_abstracts = num_abstracts_a)
-        families = model.load_all_families()
-        family_id_list = list(families.keys())
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_index = {executor.submit(analyzer.interp_superfeature, families[family_id_list[i]], model): i 
-                            for i in range(start_index, len(family_id_list))}
-            
-            for future in tqdm(concurrent.futures.as_completed(future_to_index), 
-                            total= len(family_id_list) - start_index, 
-                            desc="Analysing families"):
-                feature_index = future_to_index[future]
-                try:
-                    feature = future.result()
-                    results.append(feature)
-                    
-                    # Save checkpoint
-                    if len(results) % SAVE_INTERVAL == 0:
-                        save_results(results, save_file)
-                        print(f"Checkpoint saved. Processed {len(results)} features.")
-                    
-                except Exception as exc:
-                    print(f"Family {feature_index} generated an exception: {exc}")
-
-        save_results(results, save_file)
-        print(f"Analysis complete. Results saved to {save_file}")
 
 if __name__ == "__main__":
     main()

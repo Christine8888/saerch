@@ -163,6 +163,7 @@ def recursive_subtree(G_tree):
     return subtrees  
 
 def delete_top(mat, norms, subtrees, clean_labels):
+    # delete top node from subtrees
     new_clean_labels = clean_labels.copy()
     for subtree in subtrees:
         try:
