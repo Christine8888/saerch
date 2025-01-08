@@ -1,3 +1,4 @@
-models/
 config.yaml
-
+models/
+.DS_Store
+**/.DS_store
